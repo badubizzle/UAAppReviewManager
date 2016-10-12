@@ -11,6 +11,57 @@
 #import "UAAppReviewManager.h"
 #import <SystemConfiguration/SCNetworkReachability.h>
 #include <netinet/in.h>
+#import <objc/runtime.h>
+
+
+@implementation UIAlertController (Private)
+
+@dynamic alertWindow;
+
+- (void)setAlertWindow:(UIWindow *)alertWindow {
+    objc_setAssociatedObject(self, @selector(alertWindow), alertWindow, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+- (UIWindow *)alertWindow {
+    return objc_getAssociatedObject(self, @selector(alertWindow));
+}
+
+@end
+
+@implementation UIAlertController (Window)
+
+- (void)show {
+    [self show:YES];
+}
+
+- (void)show:(BOOL)animated {
+    self.alertWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    self.alertWindow.rootViewController = [[UIViewController alloc] init];
+    
+    id<UIApplicationDelegate> delegate = [UIApplication sharedApplication].delegate;
+    // Applications that does not load with UIMainStoryboardFile might not have a window property:
+    if ([delegate respondsToSelector:@selector(window)]) {
+        // we inherit the main window's tintColor
+        self.alertWindow.tintColor = delegate.window.tintColor;
+    }
+    
+    // window level is above the top window (this makes the alert, if it's a sheet, show over the keyboard)
+    UIWindow *topWindow = [UIApplication sharedApplication].windows.lastObject;
+    self.alertWindow.windowLevel = topWindow.windowLevel + 1;
+    
+    [self.alertWindow makeKeyAndVisible];
+    [self.alertWindow.rootViewController presentViewController:self animated:animated completion:nil];
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    
+    // precaution to insure window gets destroyed
+    self.alertWindow.hidden = YES;
+    self.alertWindow = nil;
+}
+
+@end
 
 #if ! __has_feature(objc_arc)
 #warning This file must be compiled with ARC. Use -fobjc-arc flag (or convert project to ARC).
@@ -318,18 +369,6 @@ static NSString * const reviewURLTemplate                   = @"macappstore://it
 
 + (NSString *)reviewURLString {
 	return [[UAAppReviewManager defaultManager] reviewURLString];
-}
-
-+ (BOOL)canRateApp {
-    return [[UAAppReviewManager defaultManager] ratingConditionsHaveBeenMet];
-}
-
-+ (void)dontRate {
-    [[UAAppReviewManager defaultManager] dontRate];
-}
-
-+ (void)remindMeLater {
-    [[UAAppReviewManager defaultManager] remindMeLater];
 }
 
 + (void)rateApp {
@@ -766,7 +805,7 @@ static NSString * const reviewURLTemplate                   = @"macappstore://it
 }
 
 - (void)showPrompt {
-    if ((self.appID && [self connectedToNetwork] && ![self userHasDeclinedToRate] && ![self userHasRatedCurrentVersion]) || self.debugEnabled) {
+    if (self.appID && [self connectedToNetwork] && ![self userHasDeclinedToRate] && ![self userHasRatedCurrentVersion]) {
         [self showRatingAlert];
     }
 }
@@ -827,19 +866,51 @@ static NSString * const reviewURLTemplate                   = @"macappstore://it
 
 #if defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
 - (void)showRatingAlert {
-	UIAlertView *alertView = [[UIAlertView alloc] initWithTitle:self.reviewTitle
-														message:self.reviewMessage
-													   delegate:self
-											  cancelButtonTitle:self.cancelButtonTitle
-											  otherButtonTitles:(self.showsRemindButton ? self.remindButtonTitle : self.rateButtonTitle),   // If we have a remind button, show it first. Otherwise show the rate button
-                                                                (self.showsRemindButton ? self.rateButtonTitle : nil),                      // If we have a remind button, show the rate button next. Otherwise stop adding buttons.
-                                                                nil];
-    alertView.cancelButtonIndex = -1;
+//	UIAlertView *alertView = [[UIAlertView alloc] initWithTitle:self.reviewTitle
+//														message:self.reviewMessage
+//													   delegate:self
+//											  cancelButtonTitle:self.cancelButtonTitle
+//											  otherButtonTitles:(self.showsRemindButton ? self.remindButtonTitle : self.rateButtonTitle),   // If we have a remind button, show it first. Otherwise show the rate button
+//                                                                (self.showsRemindButton ? self.rateButtonTitle : nil),                      // If we have a remind button, show the rate button next. Otherwise stop adding buttons.
+//                                                                nil];
+    
+    
+    
+    /*
+    
+    UIAlertView *alertView = [[UIAlertView alloc] initWithTitle:self.reviewTitle
+                                                        message:self.reviewMessage
+                                                       delegate:self
+                                              cancelButtonTitle:nil //self.cancelButtonTitle
+                                              otherButtonTitles:self.rateButtonTitle,self.remindButtonTitle,self.cancelButtonTitle,   // If we have a remind button, show it first. Otherwise show the rate button
+                                                     // If we have a remind button, show the rate button next. Otherwise stop adding buttons.
+                              nil];
+    
+    alertView.cancelButtonIndex = 2;
 	self.ratingAlert = alertView;
     [alertView show];
-	
-    if (self.didDisplayAlertBlock)
+    */
+    
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:self.reviewTitle message:self.reviewMessage preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:self.rateButtonTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+       
+        [self _rateApp];
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:self.remindButtonTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        [self remindMeLater];
+    }]];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:self.cancelButtonTitle style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
+        [self dontRate];
+    }]];
+    
+    [alert show:YES];
+    
+    if (self.didDisplayAlertBlock){
 		self.didDisplayAlertBlock();
+    }
+    
 }
 
 #else
@@ -876,18 +947,38 @@ static NSString * const reviewURLTemplate                   = @"macappstore://it
 - (void)alertView:(UIAlertView *)alertView didDismissWithButtonIndex:(NSInteger)buttonIndex {
     
     // cancelButtonIndex is set to -1 to show the cancel button up top, but a tap on it ends up here with index 0
-	if (alertView.cancelButtonIndex == buttonIndex || 0 == buttonIndex) {
-		// they don't want to rate it
-		[self dontRate];
-		
-	} else if (self.showsRemindButton && alertView.firstOtherButtonIndex == buttonIndex) {
-        // remind them later
-        [self remindMeLater];
-		
-	} else {
-		// they want to rate it
-		[self _rateApp];
-	}
+    
+    if(buttonIndex>=0 && buttonIndex<3){
+        NSString *buttonTitle = [self.ratingAlert buttonTitleAtIndex:buttonIndex];
+        
+        if([buttonTitle isEqualToString:self.rateButtonTitle]){
+            [self _rateApp];
+            return;
+        }
+        if([buttonTitle isEqualToString:self.remindButtonTitle]){
+            [self remindMeLater];
+            return;
+            
+        }
+        if ([buttonTitle isEqualToString:self.cancelButtonTitle]){
+            [self dontRate];
+            return;
+        }
+    }
+    
+//    
+//	if (alertView.cancelButtonIndex == buttonIndex || 0 == buttonIndex) {
+//		// they don't want to rate it
+//		[self dontRate];
+//		
+//	} else if (self.showsRemindButton && alertView.firstOtherButtonIndex == buttonIndex) {
+//        // remind them later
+//        [self remindMeLater];
+//		
+//	} else {
+//		// they want to rate it
+//		[self _rateApp];
+//	}
 }
 
 //Delegate call from the StoreKit view.
